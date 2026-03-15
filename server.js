@@ -5,22 +5,22 @@ import {
   SystemProgram, LAMPORTS_PER_SOL, sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
-
+ 
 const PORT = process.env.PORT || 3001;
 const HELIUS_RPC = process.env.HELIUS_RPC;
 const HOUSE_KEYPAIR_BASE58 = process.env.HOUSE_KEYPAIR;
 const FRONTEND_URL = process.env.FRONTEND_URL || "*";
-
+ 
 if (!HELIUS_RPC) throw new Error("Missing HELIUS_RPC");
 if (!HOUSE_KEYPAIR_BASE58) throw new Error("Missing HOUSE_KEYPAIR");
-
+ 
 const houseKeypair = Keypair.fromSecretKey(bs58.decode(HOUSE_KEYPAIR_BASE58));
 const HOUSE_PUBKEY = houseKeypair.publicKey.toString();
 const connection = new Connection(HELIUS_RPC, "confirmed");
 console.log(`House wallet: ${HOUSE_PUBKEY}`);
-
+ 
 const lobbies = new Map();
-
+ 
 // ── Solana helpers ──
 async function verifyPayment(signature, expectedLamports, fromWallet) {
   await sleep(2000);
@@ -40,7 +40,7 @@ async function verifyPayment(signature, expectedLamports, fromWallet) {
   }
   throw new Error("Could not verify transaction");
 }
-
+ 
 async function sendPayout(toWallet, amountSol) {
   const lamports = Math.round(amountSol * LAMPORTS_PER_SOL) - 5000;
   if (lamports <= 0) throw new Error("Payout too small");
@@ -49,14 +49,14 @@ async function sendPayout(toWallet, amountSol) {
   console.log(`Payout: ${amountSol} SOL to ${toWallet} — ${sig}`);
   return sig;
 }
-
+ 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
+ 
 // ── Game logic ──
 const CK = 15, BAR = "bar", OFF = "off", WHITE = 1, BLACK = -1;
-function initialBoard() { const b = Array(24).fill(0); b[0]=2;b[5]=-5;b[7]=-3;b[11]=5;b[12]=-5;b[16]=3;b[18]=5;b[23]=-2; return b; }
+function initialBoard() { const b = Array(24).fill(0); b[0]=-2;b[5]=5;b[7]=3;b[11]=-5;b[12]=5;b[16]=-3;b[18]=-5;b[23]=2; return b; }
 const rollDie = () => Math.floor(Math.random() * 6) + 1;
-
+ 
 function getValidMoves(board,bW,bB,pl,dice){const m=[];findMoves(board,bW,bB,pl,[...dice],[],m,new Set());return m}
 function findMoves(board,bW,bB,pl,rd,cm,am,seen){if(!rd.length){const k=JSON.stringify(cm);if(!seen.has(k)){seen.add(k);am.push([...cm])}return}let f=false;for(let di=0;di<rd.length;di++){const die=rd[di];const srcs=getSources(board,bW,bB,pl);for(const src of srcs){const dest=getDest(src,die,pl);if(dest===null)continue;if(!isValid(board,bW,bB,pl,src,dest,die))continue;f=true;const[nb,nW,nB,hit]=doMove(board,bW,bB,pl,src,dest);const nd=[...rd];nd.splice(di,1);findMoves(nb,nW,nB,pl,nd,[...cm,{from:src,to:dest,die,hit}],am,seen)}}if(!f&&cm.length>0){const k=JSON.stringify(cm);if(!seen.has(k)){seen.add(k);am.push([...cm])}}}
 function getSources(board,bW,bB,pl){const bar=pl===WHITE?bW:bB;if(bar>0)return[BAR];const s=[];for(let i=0;i<24;i++){if((pl===WHITE&&board[i]>0)||(pl===BLACK&&board[i]<0))s.push(i)}return s}
@@ -68,7 +68,7 @@ function getBorneOff(board,bW,bB,pl){let on=pl===WHITE?bW:bB;for(let i=0;i<24;i+
 function checkWinner(board,bW,bB){if(getBorneOff(board,bW,bB,WHITE)===CK)return WHITE;if(getBorneOff(board,bW,bB,BLACK)===CK)return BLACK;return null}
 function getWinMult(board,bW,bB,winner){const loser=winner===WHITE?BLACK:WHITE;if(getBorneOff(board,bW,bB,loser)===0){const lb=loser===WHITE?bW:bB;let ih=false;for(let i=0;i<24;i++){if(loser===WHITE&&board[i]>0&&i<=5)ih=true;if(loser===BLACK&&board[i]<0&&i>=18)ih=true}if(lb>0||ih)return 3;return 2}return 1}
 function getMaxMoves(vm){return vm.length?Math.max(...vm.map(m=>m.length)):0}
-
+ 
 function validateMoveSequence(game, player, moves) {
   const allValid = getValidMoves(game.board, game.barW, game.barB, player, game.dice);
   const maxLen = getMaxMoves(allValid);
@@ -88,18 +88,18 @@ function validateMoveSequence(game, player, moves) {
   }
   return { ok: true, board: b, barW: bw, barB: bb };
 }
-
+ 
 // ── Express ──
 const app = express();
 app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json());
-
+ 
 const genId = () => Math.random().toString(36).slice(2, 10);
 function getColor(lobby, pid) { if (lobby.host.playerId === pid) return WHITE; if (lobby.guest?.playerId === pid) return BLACK; return null; }
-
+ 
 app.get("/health", (_, res) => res.json({ ok: true, house: HOUSE_PUBKEY }));
 app.get("/house", (_, res) => res.json({ publicKey: HOUSE_PUBKEY }));
-
+ 
 app.post("/lobby/create", async (req, res) => {
   try {
     const { playerName, wallet, wagerPerPoint, txSignature } = req.body;
@@ -117,7 +117,7 @@ app.post("/lobby/create", async (req, res) => {
     res.json({ lobbyId: id, playerId: lobby.host.playerId, color: WHITE });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.post("/lobby/:id/join", async (req, res) => {
   try {
     const lobby = lobbies.get(req.params.id);
@@ -136,13 +136,13 @@ app.post("/lobby/:id/join", async (req, res) => {
     res.json({ playerId: lobby.guest.playerId, color: BLACK, wagerPerPoint: wager });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.get("/lobby/:id", (req, res) => {
   const lobby = lobbies.get(req.params.id);
   if (!lobby) return res.status(404).json({ error: "Lobby not found" });
   res.json(sanitize(lobby));
 });
-
+ 
 app.post("/lobby/:id/start", (req, res) => {
   const lobby = lobbies.get(req.params.id);
   if (!lobby) return res.status(404).json({ error: "Not found" });
@@ -154,7 +154,7 @@ app.post("/lobby/:id/start", (req, res) => {
   lobby.status = "playing"; lobby.version++; lobby.payoutProcessed = false; lobby.payoutSignature = null; lobby.payoutError = null;
   res.json(sanitize(lobby));
 });
-
+ 
 app.post("/lobby/:id/move", (req, res) => {
   const lobby = lobbies.get(req.params.id);
   if (!lobby?.game || lobby.game.phase !== "move") return res.status(400).json({ error: "Not in move phase" });
@@ -177,7 +177,7 @@ app.post("/lobby/:id/move", (req, res) => {
   lobby.version++;
   res.json(sanitize(lobby));
 });
-
+ 
 app.post("/lobby/:id/double", async (req, res) => {
   try {
     const lobby = lobbies.get(req.params.id);
@@ -195,7 +195,7 @@ app.post("/lobby/:id/double", async (req, res) => {
     res.json(sanitize(lobby));
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.post("/lobby/:id/double-response", async (req, res) => {
   try {
     const lobby = lobbies.get(req.params.id);
@@ -206,7 +206,7 @@ app.post("/lobby/:id/double-response", async (req, res) => {
     const name = player === WHITE ? lobby.host.name : lobby.guest.name;
     const wallet = player === WHITE ? lobby.host.wallet : lobby.guest.wallet;
     const { action, txSignature } = req.body;
-
+ 
     if (action === "drop") {
       lobby.game.winner = dp.from; lobby.game.winPoints = lobby.game.cubeValue; lobby.game.phase = "gameover";
       lobby.game.lastAction = `${name} drops`; lobby.game.doublingPending = null;
@@ -228,7 +228,7 @@ app.post("/lobby/:id/double-response", async (req, res) => {
     res.json(sanitize(lobby));
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
-
+ 
 function handleWin(lobby, winner) {
   const mult = getWinMult(lobby.game.board, lobby.game.barW, lobby.game.barB, winner);
   const pts = mult * lobby.game.cubeValue;
@@ -238,7 +238,7 @@ function handleWin(lobby, winner) {
   lobby.matchScore[winner === WHITE ? "w" : "b"] += pts;
   processPayoutForLobby(lobby).catch(e => console.error("Payout:", e));
 }
-
+ 
 async function processPayoutForLobby(lobby) {
   if (lobby.wagerPerPoint <= 0 || lobby.totalPot <= 0 || lobby.payoutProcessed) return;
   const wallet = lobby.game.winner === WHITE ? lobby.host.wallet : lobby.guest.wallet;
@@ -246,11 +246,11 @@ async function processPayoutForLobby(lobby) {
   try { const sig = await sendPayout(wallet, lobby.totalPot); lobby.payoutSignature = sig; lobby.payoutProcessed = true; lobby.version++; }
   catch (e) { console.error(`Payout failed ${lobby.id}:`, e); lobby.payoutError = e.message; }
 }
-
+ 
 function sanitize(lobby) {
   return { id: lobby.id, host: { name: lobby.host.name, wallet: lobby.host.wallet }, guest: lobby.guest ? { name: lobby.guest.name, wallet: lobby.guest.wallet } : null, status: lobby.status, game: lobby.game, matchScore: lobby.matchScore, wagerPerPoint: lobby.wagerPerPoint, totalPot: lobby.totalPot, version: lobby.version, payoutSignature: lobby.payoutSignature || null, payoutError: lobby.payoutError || null };
 }
-
+ 
 setInterval(() => { const cut = Date.now() - 4 * 3600000; for (const [id, l] of lobbies) if (l.createdAt < cut) { lobbies.delete(id); console.log(`Cleaned ${id}`); } }, 30 * 60000);
-
+ 
 app.listen(PORT, () => console.log(`Server :${PORT} — House: ${HOUSE_PUBKEY}`));
