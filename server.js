@@ -1,3 +1,6 @@
+
+Copy
+
 import express from "express";
 import cors from "cors";
 import {
@@ -227,6 +230,52 @@ app.post("/lobby/:id/double-response", async (req, res) => {
     lobby.version++;
     res.json(sanitize(lobby));
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+ 
+// ── Forfeit ──
+app.post("/lobby/:id/forfeit", (req, res) => {
+  try {
+    const lobby = lobbies.get(req.params.id);
+    if (!lobby) return res.status(404).json({ error: "Not found" });
+    const player = getColor(lobby, req.body.playerId);
+    if (player === null) return res.status(403).json({ error: "Not a player" });
+    if (!lobby.game || lobby.game.phase === "gameover") return res.status(400).json({ error: "No active game" });
+    const winner = player === WHITE ? BLACK : WHITE;
+    const pts = lobby.game.cubeValue;
+    lobby.game.winner = winner; lobby.game.winPoints = pts; lobby.game.phase = "gameover";
+    const loserName = player === WHITE ? lobby.host.name : lobby.guest.name;
+    const winnerName = winner === WHITE ? lobby.host.name : lobby.guest.name;
+    lobby.game.lastAction = `${loserName} forfeits. ${winnerName} wins ${pts}pt.`;
+    lobby.game.doublingPending = null;
+    lobby.matchScore[winner === WHITE ? "w" : "b"] += pts;
+    lobby.version++;
+    processPayoutForLobby(lobby).catch(e => console.error("Payout:", e));
+    res.json(sanitize(lobby));
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+ 
+// ── List all lobbies ──
+app.get("/lobbies", (req, res) => {
+  const list = [];
+  for (const [id, lobby] of lobbies) {
+    list.push({
+      id,
+      host: lobby.host.name,
+      guest: lobby.guest?.name || null,
+      status: lobby.status,
+      wagerPerPoint: lobby.wagerPerPoint,
+      totalPot: lobby.totalPot,
+      joinable: lobby.status === "waiting" && !lobby.guest,
+      createdAt: lobby.createdAt,
+    });
+  }
+  // Sort: joinable first, then by creation time (newest first)
+  list.sort((a, b) => {
+    if (a.joinable && !b.joinable) return -1;
+    if (!a.joinable && b.joinable) return 1;
+    return b.createdAt - a.createdAt;
+  });
+  res.json({ lobbies: list });
 });
  
 function handleWin(lobby, winner) {
