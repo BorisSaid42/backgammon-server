@@ -16,7 +16,7 @@ import bs58 from "bs58";
 // ═══════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3001;
 const HELIUS_RPC = process.env.HELIUS_RPC;
-const HOUSE_KEYPAIR_BASE58 = process.env.HOUSE_KEYPAIR; // base58-encoded secret key
+const HOUSE_KEYPAIR_BASE58 = process.env.HOUSE_KEYPAIR;
 const FRONTEND_URL = process.env.FRONTEND_URL || "*";
 
 if (!HELIUS_RPC) throw new Error("Missing HELIUS_RPC env var");
@@ -29,60 +29,34 @@ const connection = new Connection(HELIUS_RPC, "confirmed");
 console.log(`House wallet: ${HOUSE_PUBKEY}`);
 
 // ═══════════════════════════════════════════════════════════════
-// IN-MEMORY STORE (swap for Redis/DB in production)
+// IN-MEMORY STORE
 // ═══════════════════════════════════════════════════════════════
-const lobbies = new Map(); // lobbyId -> lobby object
+const lobbies = new Map();
 
 // ═══════════════════════════════════════════════════════════════
 // SOLANA HELPERS
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Verify that a transaction signature represents a real SOL transfer
- * to the house wallet of at least the expected amount.
- */
 async function verifyPayment(signature, expectedLamports, fromWallet) {
-  // Wait a moment for the transaction to propagate
   await sleep(2000);
-
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
       const tx = await connection.getParsedTransaction(signature, {
         commitment: "confirmed",
         maxSupportedTransactionVersion: 0,
       });
-
-      if (!tx) {
-        await sleep(2000);
-        continue;
-      }
-
-      if (tx.meta?.err) {
-        throw new Error("Transaction failed on-chain");
-      }
-
-      // Check that this transaction actually transfers SOL to the house wallet
+      if (!tx) { await sleep(2000); continue; }
+      if (tx.meta?.err) throw new Error("Transaction failed on-chain");
       const instructions = tx.transaction.message.instructions;
       let verified = false;
-
       for (const ix of instructions) {
         if (ix.program === "system" && ix.parsed?.type === "transfer") {
           const info = ix.parsed.info;
-          if (
-            info.destination === HOUSE_PUBKEY &&
-            info.source === fromWallet &&
-            info.lamports >= expectedLamports
-          ) {
-            verified = true;
-            break;
+          if (info.destination === HOUSE_PUBKEY && info.source === fromWallet && info.lamports >= expectedLamports) {
+            verified = true; break;
           }
         }
       }
-
-      if (!verified) {
-        throw new Error("Transaction does not match expected payment");
-      }
-
+      if (!verified) throw new Error("Transaction does not match expected payment");
       return true;
     } catch (e) {
       if (attempt === 9) throw e;
@@ -92,37 +66,20 @@ async function verifyPayment(signature, expectedLamports, fromWallet) {
   throw new Error("Could not verify transaction after 10 attempts");
 }
 
-/**
- * Send SOL from the house wallet to a winner.
- */
 async function sendPayout(toWalletStr, amountSol) {
   const toPubkey = new PublicKey(toWalletStr);
   const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
-
-  // Deduct a small amount for tx fees (5000 lamports = 0.000005 SOL)
   const netLamports = lamports - 5000;
   if (netLamports <= 0) throw new Error("Payout too small to cover fees");
-
   const transaction = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: houseKeypair.publicKey,
-      toPubkey,
-      lamports: netLamports,
-    })
+    SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey, lamports: netLamports })
   );
-
-  const signature = await sendAndConfirmTransaction(connection, transaction, [houseKeypair], {
-    commitment: "confirmed",
-  });
-
+  const signature = await sendAndConfirmTransaction(connection, transaction, [houseKeypair], { commitment: "confirmed" });
   console.log(`Payout sent: ${amountSol} SOL to ${toWalletStr} — sig: ${signature}`);
   return signature;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 // ═══════════════════════════════════════════════════════════════
 // GAME LOGIC (server-authoritative)
@@ -149,61 +106,31 @@ function checkWinner(board,barW,barB){if(getBorneOff(board,barW,barB,WHITE)===CH
 function getWinMultiplier(board,barW,barB,winner){const loser=winner===WHITE?BLACK:WHITE;const lo=getBorneOff(board,barW,barB,loser);if(lo===0){const lb=loser===WHITE?barW:barB;let ih=false;for(let i=0;i<24;i++){if(loser===WHITE&&board[i]>0&&i<=5)ih=true;if(loser===BLACK&&board[i]<0&&i>=18)ih=true}if(lb>0||ih)return 3;return 2}return 1}
 function getMaxMoves(vm){if(vm.length===0)return 0;return Math.max(...vm.map(m=>m.length))}
 
-/**
- * Validate that a sequence of moves is legal given the current board and dice.
- */
 function validateMoveSequence(game, player, moves) {
   const allValid = getValidMoves(game.board, game.barW, game.barB, player, game.dice);
   const maxLen = getMaxMoves(allValid);
-
   if (moves.length === 0) {
-    // Passing — only valid if no moves possible
     if (maxLen > 0) return { ok: false, error: "You have valid moves available" };
     return { ok: true };
   }
-
-  // Check that this exact move sequence exists in valid moves
-  // Or that it uses the maximum number of dice
   let b = [...game.board], bw = game.barW, bb = game.barB;
   const usedDice = [];
-
   for (const m of moves) {
     const remainingDice = [...game.dice];
-    for (const ud of usedDice) {
-      const idx = remainingDice.indexOf(ud);
-      if (idx >= 0) remainingDice.splice(idx, 1);
-    }
-
-    if (!isValidMove(b, bw, bb, player, m.from, m.to, m.die)) {
-      return { ok: false, error: `Invalid move: ${m.from} -> ${m.to} with die ${m.die}` };
-    }
-
-    if (!remainingDice.includes(m.die)) {
-      return { ok: false, error: `Die ${m.die} not available` };
-    }
-
+    for (const ud of usedDice) { const idx = remainingDice.indexOf(ud); if (idx >= 0) remainingDice.splice(idx, 1); }
+    if (!isValidMove(b, bw, bb, player, m.from, m.to, m.die)) return { ok: false, error: `Invalid move: ${m.from} -> ${m.to} with die ${m.die}` };
+    if (!remainingDice.includes(m.die)) return { ok: false, error: `Die ${m.die} not available` };
     [b, bw, bb] = applyMove(b, bw, bb, player, m.from, m.to).slice(0, 3);
     usedDice.push(m.die);
   }
-
-  // Verify player used max possible dice
   if (moves.length < maxLen) {
-    // Check if there are more moves possible from the current position
     const remainingDice = [...game.dice];
-    for (const ud of usedDice) {
-      const idx = remainingDice.indexOf(ud);
-      if (idx >= 0) remainingDice.splice(idx, 1);
-    }
+    for (const ud of usedDice) { const idx = remainingDice.indexOf(ud); if (idx >= 0) remainingDice.splice(idx, 1); }
     const moreMoves = getValidMoves(b, bw, bb, player, remainingDice);
-    const moreMax = getMaxMoves(moreMoves);
-    if (moreMax > 0) {
-      return { ok: false, error: "You must use all possible dice" };
-    }
+    if (getMaxMoves(moreMoves) > 0) return { ok: false, error: "You must use all possible dice" };
   }
-
   return { ok: true, board: b, barW: bw, barB: bb };
 }
-
 
 // ═══════════════════════════════════════════════════════════════
 // EXPRESS APP
@@ -212,304 +139,170 @@ const app = express();
 app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json());
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ ok: true, house: HOUSE_PUBKEY });
-});
+app.get("/health", (req, res) => res.json({ ok: true, house: HOUSE_PUBKEY }));
+app.get("/house", (req, res) => res.json({ publicKey: HOUSE_PUBKEY }));
 
-// Get house wallet public key (frontend needs this to build transactions)
-app.get("/house", (req, res) => {
-  res.json({ publicKey: HOUSE_PUBKEY });
-});
-
-// ── Create Lobby ──
 app.post("/lobby/create", async (req, res) => {
   try {
     const { playerName, wallet, wagerPerPoint, txSignature } = req.body;
     if (!playerName || !wallet) return res.status(400).json({ error: "Missing playerName or wallet" });
-
     const wager = parseFloat(wagerPerPoint) || 0;
-
-    // Verify payment if wager > 0
     if (wager > 0) {
       if (!txSignature) return res.status(400).json({ error: "Payment transaction signature required" });
-      const expectedLamports = Math.round(wager * LAMPORTS_PER_SOL);
-      try {
-        await verifyPayment(txSignature, expectedLamports, wallet);
-      } catch (e) {
-        return res.status(400).json({ error: "Payment verification failed: " + e.message });
-      }
+      await verifyPayment(txSignature, Math.round(wager * LAMPORTS_PER_SOL), wallet);
     }
-
     const id = genId();
-    const lobby = {
-      id,
-      host: { name: playerName, wallet, playerId: genId() },
-      guest: null,
-      status: "waiting",
-      game: null,
-      matchScore: { w: 0, b: 0 },
-      wagerPerPoint: wager,
-      totalPot: wager,
-      hostPaid: wager,
-      guestPaid: 0,
-      payouts: [],
-      version: 0,
-      createdAt: Date.now(),
-    };
-
+    const lobby = { id, host: { name: playerName, wallet, playerId: genId() }, guest: null, status: "waiting", game: null, matchScore: { w: 0, b: 0 }, wagerPerPoint: wager, totalPot: wager, hostPaid: wager, guestPaid: 0, payouts: [], version: 0, createdAt: Date.now() };
     lobbies.set(id, lobby);
     console.log(`Lobby created: ${id} — wager: ${wager} SOL`);
-
     res.json({ lobbyId: id, playerId: lobby.host.playerId, color: WHITE });
-  } catch (e) {
-    console.error("Create lobby error:", e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error("Create lobby error:", e); res.status(500).json({ error: e.message }); }
 });
 
-// ── Join Lobby ──
 app.post("/lobby/:id/join", async (req, res) => {
   try {
     const lobby = lobbies.get(req.params.id);
     if (!lobby) return res.status(404).json({ error: "Lobby not found" });
     if (lobby.guest) return res.status(400).json({ error: "Lobby is full" });
-
     const { playerName, wallet, txSignature } = req.body;
     if (!playerName || !wallet) return res.status(400).json({ error: "Missing playerName or wallet" });
-
     const wager = lobby.wagerPerPoint;
     if (wager > 0) {
       if (!txSignature) return res.status(400).json({ error: "Payment transaction signature required" });
-      const expectedLamports = Math.round(wager * LAMPORTS_PER_SOL);
-      try {
-        await verifyPayment(txSignature, expectedLamports, wallet);
-      } catch (e) {
-        return res.status(400).json({ error: "Payment verification failed: " + e.message });
-      }
+      await verifyPayment(txSignature, Math.round(wager * LAMPORTS_PER_SOL), wallet);
     }
-
     lobby.guest = { name: playerName, wallet, playerId: genId() };
-    lobby.guestPaid = wager;
-    lobby.totalPot += wager;
-    lobby.version++;
-
+    lobby.guestPaid = wager; lobby.totalPot += wager; lobby.version++;
     console.log(`Player joined lobby ${req.params.id}: ${playerName}`);
-
     res.json({ playerId: lobby.guest.playerId, color: BLACK, wagerPerPoint: wager });
-  } catch (e) {
-    console.error("Join lobby error:", e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error("Join lobby error:", e); res.status(500).json({ error: e.message }); }
 });
 
-// ── Get Lobby State ──
 app.get("/lobby/:id", (req, res) => {
   const lobby = lobbies.get(req.params.id);
   if (!lobby) return res.status(404).json({ error: "Lobby not found" });
-
-  // Return sanitized lobby (no internal player IDs exposed beyond what's needed)
   res.json(sanitizeLobby(lobby));
 });
 
-// ── Start Game ──
 app.post("/lobby/:id/start", (req, res) => {
   const lobby = lobbies.get(req.params.id);
   if (!lobby) return res.status(404).json({ error: "Lobby not found" });
-
   const { playerId } = req.body;
   if (playerId !== lobby.host.playerId) return res.status(403).json({ error: "Only host can start" });
   if (!lobby.guest) return res.status(400).json({ error: "Need an opponent" });
-
   let d1 = rollDie(), d2 = rollDie();
   while (d1 === d2) { d1 = rollDie(); d2 = rollDie(); }
   const fp = d1 > d2 ? WHITE : BLACK;
-
-  lobby.game = {
-    board: initialBoard(), barW: 0, barB: 0,
-    turn: fp, dice: [d1, d2].sort((a, b) => b - a),
-    phase: "move", cubeValue: 1, cubeOwner: 0,
-    winner: null, winPoints: 0, moveCount: 0,
-    lastAction: `Game started. ${fp === WHITE ? lobby.host.name : lobby.guest.name} goes first (${d1}-${d2}).`,
-    doublingPending: null,
-  };
-  lobby.status = "playing";
-  lobby.version++;
-
+  lobby.game = { board: initialBoard(), barW: 0, barB: 0, turn: fp, dice: [d1, d2].sort((a, b) => b - a), phase: "move", cubeValue: 1, cubeOwner: 0, winner: null, winPoints: 0, moveCount: 0, lastAction: `Game started. ${fp === WHITE ? lobby.host.name : lobby.guest.name} goes first (${d1}-${d2}).`, doublingPending: null };
+  lobby.status = "playing"; lobby.version++; lobby.payoutProcessed = false; lobby.payoutSignature = null; lobby.payoutError = null;
   res.json(sanitizeLobby(lobby));
 });
 
-// ── Submit Moves ──
 app.post("/lobby/:id/move", (req, res) => {
   const lobby = lobbies.get(req.params.id);
   if (!lobby) return res.status(404).json({ error: "Lobby not found" });
   if (!lobby.game || lobby.game.phase !== "move") return res.status(400).json({ error: "Not in move phase" });
-
   const { playerId, moves } = req.body;
   const player = getPlayerColor(lobby, playerId);
   if (player === null) return res.status(403).json({ error: "Not a player in this lobby" });
   if (lobby.game.turn !== player) return res.status(400).json({ error: "Not your turn" });
-
   const validation = validateMoveSequence(lobby.game, player, moves || []);
   if (!validation.ok) return res.status(400).json({ error: validation.error });
-
-  // Apply moves
-  if (moves && moves.length > 0) {
-    lobby.game.board = validation.board;
-    lobby.game.barW = validation.barW;
-    lobby.game.barB = validation.barB;
-  }
+  if (moves && moves.length > 0) { lobby.game.board = validation.board; lobby.game.barW = validation.barW; lobby.game.barB = validation.barB; }
   lobby.game.moveCount++;
-
-  // Check for winner
   const winner = checkWinner(lobby.game.board, lobby.game.barW, lobby.game.barB);
-  if (winner) {
-    handleGameWin(lobby, winner);
-  } else {
-    // Next turn
+  if (winner) { handleGameWin(lobby, winner); }
+  else {
     const d1 = rollDie(), d2 = rollDie();
     lobby.game.turn = lobby.game.turn === WHITE ? BLACK : WHITE;
     lobby.game.dice = d1 === d2 ? [d1, d1, d1, d1] : [d1, d2].sort((a, b) => b - a);
     lobby.game.phase = "move";
-    const nextName = lobby.game.turn === WHITE ? lobby.host.name : lobby.guest.name;
-    lobby.game.lastAction = `${nextName}'s turn. Rolled ${lobby.game.dice.join("-")}.`;
+    lobby.game.lastAction = `${lobby.game.turn === WHITE ? lobby.host.name : lobby.guest.name}'s turn. Rolled ${lobby.game.dice.join("-")}.`;
   }
-
   lobby.version++;
   res.json(sanitizeLobby(lobby));
 });
 
-// ── Offer Double ──
 app.post("/lobby/:id/double", async (req, res) => {
   try {
     const lobby = lobbies.get(req.params.id);
     if (!lobby) return res.status(404).json({ error: "Lobby not found" });
     if (!lobby.game || lobby.game.phase !== "move") return res.status(400).json({ error: "Not in move phase" });
-
     const { playerId, txSignature } = req.body;
     const player = getPlayerColor(lobby, playerId);
     if (player === null) return res.status(403).json({ error: "Not a player" });
     if (lobby.game.turn !== player) return res.status(400).json({ error: "Not your turn" });
     if (lobby.game.cubeOwner !== 0 && lobby.game.cubeOwner !== player) return res.status(400).json({ error: "You don't own the cube" });
-
     const cost = lobby.game.cubeValue * lobby.wagerPerPoint;
     const playerWallet = player === WHITE ? lobby.host.wallet : lobby.guest.wallet;
-
     if (cost > 0) {
       if (!txSignature) return res.status(400).json({ error: "Payment required to double" });
-      const expectedLamports = Math.round(cost * LAMPORTS_PER_SOL);
-      await verifyPayment(txSignature, expectedLamports, playerWallet);
+      await verifyPayment(txSignature, Math.round(cost * LAMPORTS_PER_SOL), playerWallet);
       lobby.totalPot += cost;
       if (player === WHITE) lobby.hostPaid += cost; else lobby.guestPaid += cost;
     }
-
-    lobby.game.doublingPending = {
-      type: "double", from: player,
-      target: player === WHITE ? BLACK : WHITE,
-      value: lobby.game.cubeValue * 2,
-    };
+    lobby.game.doublingPending = { type: "double", from: player, target: player === WHITE ? BLACK : WHITE, value: lobby.game.cubeValue * 2 };
     lobby.game.phase = "double";
-    const playerName = player === WHITE ? lobby.host.name : lobby.guest.name;
-    lobby.game.lastAction = `${playerName} offers to double to ${lobby.game.cubeValue * 2}`;
+    lobby.game.lastAction = `${player === WHITE ? lobby.host.name : lobby.guest.name} offers to double to ${lobby.game.cubeValue * 2}`;
     lobby.version++;
-
     res.json(sanitizeLobby(lobby));
-  } catch (e) {
-    console.error("Double error:", e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error("Double error:", e); res.status(500).json({ error: e.message }); }
 });
 
-// ── Respond to Double (accept / beaver / drop) ──
 app.post("/lobby/:id/double-response", async (req, res) => {
   try {
     const lobby = lobbies.get(req.params.id);
     if (!lobby) return res.status(404).json({ error: "Lobby not found" });
     if (!lobby.game || lobby.game.phase !== "double") return res.status(400).json({ error: "No double pending" });
-
-    const { playerId, action, txSignature } = req.body; // action: "accept" | "beaver" | "drop"
+    const { playerId, action, txSignature } = req.body;
     const player = getPlayerColor(lobby, playerId);
     if (player === null) return res.status(403).json({ error: "Not a player" });
-
     const dp = lobby.game.doublingPending;
     if (!dp || dp.target !== player) return res.status(400).json({ error: "Double not targeted at you" });
-
     const playerName = player === WHITE ? lobby.host.name : lobby.guest.name;
     const playerWallet = player === WHITE ? lobby.host.wallet : lobby.guest.wallet;
 
     if (action === "drop") {
-      // No payment needed — game ends, doubler wins current cube value
-      lobby.game.winner = dp.from;
-      lobby.game.winPoints = lobby.game.cubeValue;
-      lobby.game.phase = "gameover";
-      lobby.game.lastAction = `${playerName} drops.`;
-      lobby.game.doublingPending = null;
+      lobby.game.winner = dp.from; lobby.game.winPoints = lobby.game.cubeValue; lobby.game.phase = "gameover";
+      lobby.game.lastAction = `${playerName} drops.`; lobby.game.doublingPending = null;
       lobby.matchScore = lobby.matchScore || { w: 0, b: 0 };
-      if (dp.from === WHITE) lobby.matchScore.w += lobby.game.cubeValue;
-      else lobby.matchScore.b += lobby.game.cubeValue;
-
-      // Payout
-      await processPayoutForLobby(lobby);
-
+      if (dp.from === WHITE) lobby.matchScore.w += lobby.game.cubeValue; else lobby.matchScore.b += lobby.game.cubeValue;
+      processPayoutForLobby(lobby).catch(e => console.error("Payout failed:", e));
     } else if (action === "accept") {
-      const newCube = dp.value;
-      const cost = (newCube - lobby.game.cubeValue) * lobby.wagerPerPoint;
-
+      const cost = (dp.value - lobby.game.cubeValue) * lobby.wagerPerPoint;
       if (cost > 0) {
-        if (!txSignature) return res.status(400).json({ error: "Payment required to accept double" });
+        if (!txSignature) return res.status(400).json({ error: "Payment required" });
         await verifyPayment(txSignature, Math.round(cost * LAMPORTS_PER_SOL), playerWallet);
         lobby.totalPot += cost;
         if (player === WHITE) lobby.hostPaid += cost; else lobby.guestPaid += cost;
       }
-
-      if (dp.type === "double") {
-        lobby.game.cubeValue = dp.value;
-        lobby.game.cubeOwner = player;
-      } else {
-        // Accepting a beaver
-        lobby.game.cubeValue = dp.value;
-        lobby.game.cubeOwner = dp.from;
-      }
-      lobby.game.doublingPending = null;
-      lobby.game.phase = "move";
+      if (dp.type === "double") { lobby.game.cubeValue = dp.value; lobby.game.cubeOwner = player; }
+      else { lobby.game.cubeValue = dp.value; lobby.game.cubeOwner = dp.from; }
+      lobby.game.doublingPending = null; lobby.game.phase = "move";
       lobby.game.lastAction = `${playerName} accepts. Cube at ${lobby.game.cubeValue}.`;
-
     } else if (action === "beaver") {
       const beaverValue = dp.value * 2;
       const cost = (beaverValue - lobby.game.cubeValue) * lobby.wagerPerPoint;
-
       if (cost > 0) {
-        if (!txSignature) return res.status(400).json({ error: "Payment required to beaver" });
+        if (!txSignature) return res.status(400).json({ error: "Payment required" });
         await verifyPayment(txSignature, Math.round(cost * LAMPORTS_PER_SOL), playerWallet);
         lobby.totalPot += cost;
         if (player === WHITE) lobby.hostPaid += cost; else lobby.guestPaid += cost;
       }
-
-      lobby.game.doublingPending = {
-        type: "beaver", from: player, target: dp.from, value: beaverValue,
-      };
+      lobby.game.doublingPending = { type: "beaver", from: player, target: dp.from, value: beaverValue };
       lobby.game.lastAction = `${playerName} beavers! Stakes now ${beaverValue}.`;
-
     } else {
       return res.status(400).json({ error: "Invalid action" });
     }
-
     lobby.version++;
     res.json(sanitizeLobby(lobby));
-  } catch (e) {
-    console.error("Double response error:", e);
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { console.error("Double response error:", e); res.status(500).json({ error: e.message }); }
 });
-
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
-
-function genId() {
-  return Math.random().toString(36).slice(2, 10);
-}
+function genId() { return Math.random().toString(36).slice(2, 10); }
 
 function getPlayerColor(lobby, playerId) {
   if (lobby.host.playerId === playerId) return WHITE;
@@ -520,78 +313,49 @@ function getPlayerColor(lobby, playerId) {
 function handleGameWin(lobby, winner) {
   const mult = getWinMultiplier(lobby.game.board, lobby.game.barW, lobby.game.barB, winner);
   const pts = mult * lobby.game.cubeValue;
-  lobby.game.winner = winner;
-  lobby.game.winPoints = pts;
-  lobby.game.phase = "gameover";
+  lobby.game.winner = winner; lobby.game.winPoints = pts; lobby.game.phase = "gameover";
   const winnerName = winner === WHITE ? lobby.host.name : lobby.guest.name;
   const typeStr = mult === 3 ? "Backgammon!" : mult === 2 ? "Gammon!" : "";
   lobby.game.lastAction = `${winnerName} wins! ${typeStr} ${pts} point(s).`;
   lobby.matchScore = lobby.matchScore || { w: 0, b: 0 };
   if (winner === WHITE) lobby.matchScore.w += pts; else lobby.matchScore.b += pts;
-
-  // Trigger async payout (don't await — let it happen in background)
   processPayoutForLobby(lobby).catch(e => console.error("Payout failed:", e));
 }
 
 async function processPayoutForLobby(lobby) {
   if (lobby.wagerPerPoint <= 0 || lobby.totalPot <= 0) return;
-  if (lobby.payoutProcessed) return; // prevent double payouts
-
+  if (lobby.payoutProcessed) return;
   const winner = lobby.game.winner;
   const winnerWallet = winner === WHITE ? lobby.host.wallet : lobby.guest.wallet;
-
   console.log(`Processing payout: ${lobby.totalPot} SOL to ${winnerWallet}`);
-
   try {
     const sig = await sendPayout(winnerWallet, lobby.totalPot);
-    lobby.payoutSignature = sig;
-    lobby.payoutProcessed = true;
-    lobby.version++;
+    lobby.payoutSignature = sig; lobby.payoutProcessed = true; lobby.version++;
     console.log(`Payout complete: ${sig}`);
   } catch (e) {
     console.error(`Payout failed for lobby ${lobby.id}:`, e);
     lobby.payoutError = e.message;
-    // In production: queue for retry, alert admin, etc.
   }
 }
 
-/**
- * Return lobby state safe for the frontend (no secret player IDs exposed fully).
- * Each client uses their playerId to authenticate, so we include it only in the
- * join/create response, not in the general state poll.
- */
 function sanitizeLobby(lobby) {
   return {
     id: lobby.id,
     host: { name: lobby.host.name, wallet: lobby.host.wallet },
     guest: lobby.guest ? { name: lobby.guest.name, wallet: lobby.guest.wallet } : null,
-    status: lobby.status,
-    game: lobby.game,
-    matchScore: lobby.matchScore,
-    wagerPerPoint: lobby.wagerPerPoint,
-    totalPot: lobby.totalPot,
-    version: lobby.version,
-    payoutSignature: lobby.payoutSignature || null,
-    payoutError: lobby.payoutError || null,
+    status: lobby.status, game: lobby.game, matchScore: lobby.matchScore,
+    wagerPerPoint: lobby.wagerPerPoint, totalPot: lobby.totalPot, version: lobby.version,
+    payoutSignature: lobby.payoutSignature || null, payoutError: lobby.payoutError || null,
   };
 }
 
-
-// ── Cleanup old lobbies every 30 minutes ──
 setInterval(() => {
-  const cutoff = Date.now() - 4 * 60 * 60 * 1000; // 4 hours
+  const cutoff = Date.now() - 4 * 60 * 60 * 1000;
   for (const [id, lobby] of lobbies) {
-    if (lobby.createdAt < cutoff) {
-      lobbies.delete(id);
-      console.log(`Cleaned up lobby ${id}`);
-    }
+    if (lobby.createdAt < cutoff) { lobbies.delete(id); console.log(`Cleaned up lobby ${id}`); }
   }
 }, 30 * 60 * 1000);
 
-
-// ═══════════════════════════════════════════════════════════════
-// START
-// ═══════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`Backgammon server running on port ${PORT}`);
   console.log(`House wallet: ${HOUSE_PUBKEY}`);
