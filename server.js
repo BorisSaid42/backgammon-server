@@ -145,14 +145,15 @@ app.get("/house", (req, res) => res.json({ publicKey: HOUSE_PUBKEY }));
 app.post("/lobby/create", async (req, res) => {
   try {
     const { playerName, wallet, wagerPerPoint, txSignature } = req.body;
-    if (!playerName || !wallet) return res.status(400).json({ error: "Missing playerName or wallet" });
+    if (!playerName) return res.status(400).json({ error: "Missing playerName" });
     const wager = parseFloat(wagerPerPoint) || 0;
+    if (wager > 0 && !wallet) return res.status(400).json({ error: "Wallet required for paid games" });
     if (wager > 0) {
       if (!txSignature) return res.status(400).json({ error: "Payment transaction signature required" });
       await verifyPayment(txSignature, Math.round(wager * LAMPORTS_PER_SOL), wallet);
     }
     const id = genId();
-    const lobby = { id, host: { name: playerName, wallet, playerId: genId() }, guest: null, status: "waiting", game: null, matchScore: { w: 0, b: 0 }, wagerPerPoint: wager, totalPot: wager, hostPaid: wager, guestPaid: 0, payouts: [], version: 0, createdAt: Date.now() };
+    const lobby = { id, host: { name: playerName, wallet: wallet || "", playerId: genId() }, guest: null, status: "waiting", game: null, matchScore: { w: 0, b: 0 }, wagerPerPoint: wager, totalPot: wager, hostPaid: wager, guestPaid: 0, payouts: [], version: 0, createdAt: Date.now() };
     lobbies.set(id, lobby);
     console.log(`Lobby created: ${id} — wager: ${wager} SOL`);
     res.json({ lobbyId: id, playerId: lobby.host.playerId, color: WHITE });
@@ -165,13 +166,14 @@ app.post("/lobby/:id/join", async (req, res) => {
     if (!lobby) return res.status(404).json({ error: "Lobby not found" });
     if (lobby.guest) return res.status(400).json({ error: "Lobby is full" });
     const { playerName, wallet, txSignature } = req.body;
-    if (!playerName || !wallet) return res.status(400).json({ error: "Missing playerName or wallet" });
+    if (!playerName) return res.status(400).json({ error: "Missing playerName" });
     const wager = lobby.wagerPerPoint;
+    if (wager > 0 && !wallet) return res.status(400).json({ error: "Wallet required for paid games" });
     if (wager > 0) {
       if (!txSignature) return res.status(400).json({ error: "Payment transaction signature required" });
       await verifyPayment(txSignature, Math.round(wager * LAMPORTS_PER_SOL), wallet);
     }
-    lobby.guest = { name: playerName, wallet, playerId: genId() };
+    lobby.guest = { name: playerName, wallet: wallet || "", playerId: genId() };
     lobby.guestPaid = wager; lobby.totalPot += wager; lobby.version++;
     console.log(`Player joined lobby ${req.params.id}: ${playerName}`);
     res.json({ playerId: lobby.guest.playerId, color: BLACK, wagerPerPoint: wager });
