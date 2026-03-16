@@ -91,7 +91,11 @@ function validateMoveSequence(game, player, moves) {
  
 // ── Express ──
 const app = express();
-app.use(cors({ origin: FRONTEND_URL }));
+const allowedOrigins = FRONTEND_URL.split(",").map(s => s.trim());
+app.use(cors({ origin: (origin, cb) => {
+  if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) cb(null, true);
+  else cb(new Error("Not allowed"));
+}}));
 app.use(express.json());
  
 const genId = () => Math.random().toString(36).slice(2, 10);
@@ -125,6 +129,7 @@ app.post("/lobby/:id/join", async (req, res) => {
     if (lobby.guest) return res.status(400).json({ error: "Lobby full" });
     const { playerName, wallet, txSignature } = req.body;
     if (!playerName) return res.status(400).json({ error: "Missing playerName" });
+    if (wallet && wallet === lobby.host.wallet && wallet !== "") return res.status(400).json({ error: "Cannot join your own lobby" });
     const wager = lobby.wagerPerPoint;
     if (wager > 0 && !wallet) return res.status(400).json({ error: "Wallet required for paid games" });
     if (wager > 0) {
@@ -240,6 +245,7 @@ app.post("/lobby/:id/forfeit", (req, res) => {
     const winner = player === WHITE ? BLACK : WHITE;
     const pts = lobby.game.cubeValue;
     lobby.game.winner = winner; lobby.game.winPoints = pts; lobby.game.phase = "gameover";
+    lobby.status = "finished";
     const loserName = player === WHITE ? lobby.host.name : lobby.guest.name;
     const winnerName = winner === WHITE ? lobby.host.name : lobby.guest.name;
     lobby.game.lastAction = `${loserName} forfeits. ${winnerName} wins ${pts}pt.`;
@@ -279,6 +285,7 @@ function handleWin(lobby, winner) {
   const mult = getWinMult(lobby.game.board, lobby.game.barW, lobby.game.barB, winner);
   const pts = mult * lobby.game.cubeValue;
   lobby.game.winner = winner; lobby.game.winPoints = pts; lobby.game.phase = "gameover";
+  lobby.status = "finished";
   const wn = winner === WHITE ? lobby.host.name : lobby.guest.name;
   lobby.game.lastAction = `${wn} wins! ${mult === 3 ? "Backgammon!" : mult === 2 ? "Gammon!" : ""} ${pts}pt`;
   lobby.matchScore[winner === WHITE ? "w" : "b"] += pts;
