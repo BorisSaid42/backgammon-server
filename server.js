@@ -42,11 +42,14 @@ async function verifyPayment(signature, expectedLamports, fromWallet) {
 }
  
 async function sendPayout(toWallet, amountSol) {
-  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL) - 5000;
+  const totalLamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+  const feeLamports = Math.round(totalLamports * 0.005); // 0.5% fee to cover costs
+  const txFee = 5000; // Solana tx fee
+  const lamports = totalLamports - feeLamports - txFee;
   if (lamports <= 0) throw new Error("Payout too small");
   const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: houseKeypair.publicKey, toPubkey: new PublicKey(toWallet), lamports }));
   const sig = await sendAndConfirmTransaction(connection, tx, [houseKeypair], { commitment: "confirmed" });
-  console.log(`Payout: ${amountSol} SOL to ${toWallet} — ${sig}`);
+  console.log(`Payout: ${amountSol} SOL (${lamports} lamports after 0.5% fee) to ${toWallet} — ${sig}`);
   return sig;
 }
  
@@ -261,6 +264,8 @@ app.post("/lobby/:id/forfeit", (req, res) => {
 app.get("/lobbies", (req, res) => {
   const list = [];
   for (const [id, lobby] of lobbies) {
+    const winner = lobby.game?.winner;
+    const winnerName = winner === WHITE ? lobby.host.name : winner === BLACK ? lobby.guest?.name : null;
     list.push({
       id,
       host: lobby.host.name,
@@ -270,6 +275,9 @@ app.get("/lobbies", (req, res) => {
       totalPot: lobby.totalPot,
       joinable: lobby.status === "waiting" && !lobby.guest,
       createdAt: lobby.createdAt,
+      winner: winnerName || null,
+      winPoints: lobby.game?.winPoints || null,
+      payout: lobby.payoutSignature ? lobby.totalPot : null,
     });
   }
   // Sort: joinable first, then by creation time (newest first)
@@ -296,8 +304,30 @@ async function processPayoutForLobby(lobby) {
   if (lobby.wagerPerPoint <= 0 || lobby.totalPot <= 0 || lobby.payoutProcessed) return;
   const wallet = lobby.game.winner === WHITE ? lobby.host.wallet : lobby.guest.wallet;
   if (!wallet) return;
-  try { const sig = await sendPayout(wallet, lobby.totalPot); lobby.payoutSignature = sig; lobby.payoutProcessed = true; lobby.version++; }
-  catch (e) { console.error(`Payout failed ${lobby.id}:`, e); lobby.payoutError = e.message; }
+  const maxRetries = 5;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Wait before retrying to let pending incoming transactions confirm
+      if (attempt > 0) {
+        const delay = attempt * 5000; // 5s, 10s, 15s, 20s
+        console.log(`Payout retry ${attempt}/${maxRetries} for lobby ${lobby.id} in ${delay/1000}s...`);
+        await sleep(delay);
+      }
+      const sig = await sendPayout(wallet, lobby.totalPot);
+      lobby.payoutSignature = sig; lobby.payoutProcessed = true; lobby.version++;
+      console.log(`Payout success for lobby ${lobby.id}: ${sig}`);
+      return;
+    } catch (e) {
+      const isInsufficientFunds = e.message?.includes("insufficient lamports") || e.transactionMessage?.includes("insufficient lamports");
+      if (isInsufficientFunds && attempt < maxRetries - 1) {
+        console.log(`Payout attempt ${attempt + 1} failed (insufficient funds), will retry...`);
+        continue;
+      }
+      console.error(`Payout failed ${lobby.id} (attempt ${attempt + 1}):`, e.message || e);
+      lobby.payoutError = e.message;
+      return;
+    }
+  }
 }
  
 function sanitize(lobby) {
