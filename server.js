@@ -260,6 +260,21 @@ app.post("/lobby/:id/forfeit", (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
  
+// ── Find active lobby by wallet ──
+app.get("/lobby/find-by-wallet/:wallet", (req, res) => {
+  const wallet = req.params.wallet;
+  for (const [id, lobby] of lobbies) {
+    if (lobby.status === "finished") continue;
+    if (lobby.host.wallet === wallet) {
+      return res.json({ found: true, lobbyId: id, playerId: lobby.host.playerId, color: WHITE, playerName: lobby.host.name });
+    }
+    if (lobby.guest?.wallet === wallet) {
+      return res.json({ found: true, lobbyId: id, playerId: lobby.guest.playerId, color: BLACK, playerName: lobby.guest.name });
+    }
+  }
+  res.json({ found: false });
+});
+ 
 // ── List all lobbies ──
 app.get("/lobbies", (req, res) => {
   const list = [];
